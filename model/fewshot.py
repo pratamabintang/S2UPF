@@ -117,13 +117,13 @@ class ProtoFormer(nn.Module):
             qry_bcb_fts['2'],
             size=qry_bcb_fts['1'].shape[-2:],
             mode='bilinear',
-            align_corners=True
+            align_corners=False
         )
         supp_feat_2 = F.interpolate(
             supp_bcb_fts['2'],
             size=supp_bcb_fts['1'].shape[-2:],
             mode='bilinear',
-            align_corners=True
+            align_corners=False
         )
         query_feat = torch.cat([qry_bcb_fts['1'], query_feat_2], dim=1)
         supp_feat = torch.cat([supp_bcb_fts['1'], supp_feat_2], dim=1)
@@ -136,7 +136,7 @@ class ProtoFormer(nn.Module):
         r_supp_feat = supp_feat.view(batch_size, self.shot, -1, fts_size[0], fts_size[1])
         for st in range(self.shot):
             mask = (s_y[:,st,:,:]==1).float().unsqueeze(1)
-            mask = F.interpolate(mask, size=(fts_size[0], fts_size[1]), mode='bilinear', align_corners=True)
+            mask = F.interpolate(mask, size=(fts_size[0], fts_size[1]), mode='bilinear', align_corners=False)
             tmp_supp_feat = r_supp_feat[:,st,...]
             tmp_supp_feat = Weighted_GAP(tmp_supp_feat, mask)
             supp_feat_list.append(tmp_supp_feat)
@@ -168,13 +168,13 @@ class ProtoFormer(nn.Module):
             corr_query_mask = None
 
         logits = self.decoder(qry_bcb_fts, prototype, corr_query_mask)
-        logits = F.interpolate(logits, size=(height, width), mode='bilinear', align_corners=True)
+        logits = F.interpolate(logits, size=(height, width), mode='bilinear', align_corners=False)
         return torch.sigmoid(logits)
 
     def predict_mask(self, batch):
         logit_mask = self(batch['query_img'], batch['support_imgs'], batch['support_masks'])
         org_qry_imsize = tuple([batch['org_query_imsize'][1].item(), batch['org_query_imsize'][0].item()])
-        logit_mask = F.interpolate(logit_mask, org_qry_imsize, mode='bilinear', align_corners=True)
+        logit_mask = F.interpolate(logit_mask, org_qry_imsize, mode='bilinear', align_corners=False)
         return logit_mask
     
     def compute_loss(self, logit_mask, gt_mask):
@@ -186,7 +186,7 @@ class ProtoFormer(nn.Module):
         cosine_eps = 1e-7
         for st in range(self.shot):
             tmp_mask = (s_y[:,st,:,:] == 1).float().unsqueeze(1)
-            tmp_mask = F.interpolate(tmp_mask, size=supp_feat_high.shape[-2:], mode='bilinear', align_corners=True)
+            tmp_mask = F.interpolate(tmp_mask, size=supp_feat_high.shape[-2:], mode='bilinear', align_corners=False)
 
             tmp_supp_feat = supp_feat_high[:,st,...] * tmp_mask               
             q = self.high_avg_pool(query_feat_high.flatten(2).transpose(-2, -1))  # [bs, h*w, c]
@@ -202,7 +202,7 @@ class ProtoFormer(nn.Module):
             similarity = similarity.max(1)[0].view(bsize, qh, qw)   
             similarity = (similarity.flatten(1) - similarity.flatten(1).min(1)[0].unsqueeze(1)) / (similarity.flatten(1).max(1)[0].unsqueeze(1) - similarity.flatten(1).min(1)[0].unsqueeze(1) + cosine_eps)
             similarity = similarity.view(bsize, 1, qh, qw)
-            corr_query = F.interpolate(similarity, size=fts_size, mode='bilinear', align_corners=True)
+            corr_query = F.interpolate(similarity, size=fts_size, mode='bilinear', align_corners=False)
             corr_query_mask_list.append(corr_query)  
         corr_query_mask = torch.cat(corr_query_mask_list, 1).mean(1).unsqueeze(1)     
         return corr_query_mask
