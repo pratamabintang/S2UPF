@@ -70,7 +70,14 @@ if __name__ == '__main__':
 
     # Load trained model
     if args.load == '': raise Exception('Pretrained model not specified.')
-    model.load_state_dict(torch.load(args.load, weights_only=False))
+    state = torch.load(args.load, weights_only=False)
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if missing or unexpected:
+        Logger.info('checkpoint mismatch: %d missing, %d unexpected keys' % (len(missing), len(unexpected)))
+        for k in missing[:20]:
+            Logger.info('  missing    %s' % k)
+        for k in unexpected[:20]:
+            Logger.info('  unexpected %s' % k)
 
     # Helper classes (for testing) initialization
     Evaluator.initialize()

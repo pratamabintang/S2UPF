@@ -5,6 +5,7 @@ from .loss import WeightedDiceLoss
 from .transformer import PositionEmbeddingSine
 from .transformer import Transformer
 from .encoder import SAM2
+from .decoder import Decoder
 
 def Weighted_GAP(supp_feat, mask):
     supp_feat = supp_feat * mask
@@ -19,11 +20,15 @@ class ProtoFormer(nn.Module):
         shot: int = 1,
         reduce_dim: int = 64,
         img_size: int = 512,
+        use_prototype: bool = True,
+        use_prior: bool = True,
         criterion = None,
         checkpoint_path: str = None,
         model_cfg: str = "sam2_hiera_l.yaml"
     ):
         super(ProtoFormer, self).__init__()
+        if img_size % 32 != 0:
+            raise ValueError('img_size must be a multiple of 32, got %d' % img_size)
         self.criterion = criterion if criterion is not None else WeightedDiceLoss()
         self.shot = shot
         self.reduce_dim = reduce_dim
@@ -60,54 +65,18 @@ class ProtoFormer(nn.Module):
         )
 
         self.high_avg_pool = nn.Identity()        
-        prior_channel = 1 
-        if img_size % 32 != 0:
-            raise ValueError('img_size must be a multiple of 32, got %d' % img_size)
         self.img_size = img_size
-        fts = img_size // 8
-        self.pyramid_bins = [(fts + r - 1) // r for r in (1, 2, 4, 8)]
-        self.avgpool_list = []
-        for bin in self.pyramid_bins:
-            if bin > 1:
-                self.avgpool_list.append(
-                    nn.AdaptiveAvgPool2d(bin)
-                )
-        self.init_merge = []
-        self.beta_conv = []        
-        for bin in self.pyramid_bins:
-            self.init_merge.append(nn.Sequential(
-                nn.Conv2d(reduce_dim*2+prior_channel, reduce_dim, kernel_size=1, padding=0, bias=False),
-                nn.BatchNorm2d(reduce_dim),
-                nn.ReLU(inplace=True)
-            ))                      
-            self.beta_conv.append(nn.Sequential(
-                nn.Conv2d(reduce_dim, reduce_dim, kernel_size=3, padding=1, bias=False),
-                nn.BatchNorm2d(reduce_dim),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(reduce_dim, reduce_dim, kernel_size=3, padding=1, bias=False),
-                nn.BatchNorm2d(reduce_dim),
-                nn.ReLU(inplace=True)
-            ))            
-
-        self.init_merge = nn.ModuleList(self.init_merge) 
-        self.beta_conv = nn.ModuleList(self.beta_conv)
-        self.res1 = nn.Sequential(
-            nn.Conv2d(reduce_dim*len(self.pyramid_bins), reduce_dim, kernel_size=1, padding=0, bias=False)                         
-        )              
-        self.res2 = nn.Sequential(
-            nn.Conv2d(reduce_dim, reduce_dim, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(reduce_dim),
-            nn.ReLU(inplace=True)
+        self.use_prototype = use_prototype
+        self.use_prior = use_prior
+        self.decoder = Decoder(
+            x1_ch=channels[0],
+            x2_ch=channels[1],
+            x3_ch=channels[2],
+            x4_ch=channels[3],
+            proto_dim=reduce_dim,
+            use_prototype=use_prototype,
+            use_prior=use_prior
         )
-        self.alpha_conv = []
-        for idx in range(len(self.pyramid_bins)-1):
-            self.alpha_conv.append(nn.Sequential(
-                nn.Conv2d(2*reduce_dim, reduce_dim, kernel_size=1, stride=1, padding=0, bias=False),
-                nn.BatchNorm2d(reduce_dim),
-                nn.ReLU()
-            ))     
-        self.alpha_conv = nn.ModuleList(self.alpha_conv)    
-
         self.init_weights()
 
     def init_weights(self):
@@ -182,46 +151,25 @@ class ProtoFormer(nn.Module):
         key_pos=self.pe_layer(query_feat)
         key_embed=query_feat
         masking=None
-        fg_embed=self.transformer(key_embed,masking,query_embed,query_pos,key_pos)
+        if self.use_prototype:
+            fg_embed=self.transformer(key_embed,masking,query_embed,query_pos,key_pos)
+            prototype = fg_embed.squeeze(-1).unsqueeze(-1).unsqueeze(-1)
+        else:
+            prototype = None
         # prior generation
         query_feat_high = qry_bcb_fts['3']
         high_size = supp_bcb_fts['3'].shape[-2:]
         supp_feat_high = supp_bcb_fts['3'].view(
             batch_size, self.shot, self.high_dim, high_size[0], high_size[1]
         )
-        corr_query_mask = self.generate_prior(query_feat_high, supp_feat_high, s_y, fts_size)
-        
-        pyramid_feat_list = []
-        for idx, tmp_bin in enumerate(self.pyramid_bins):
-            if tmp_bin <= 1.0:
-                bin = int(query_feat.shape[2] * tmp_bin)
-                query_feat_bin = nn.AdaptiveAvgPool2d(bin)(query_feat)
-            else:
-                bin = tmp_bin
-                query_feat_bin = self.avgpool_list[idx](query_feat)
-            supp_feat_bin = global_supp_pp.expand(-1, -1, bin, bin)
-            corr_mask_bin = F.interpolate(corr_query_mask, size=(bin, bin), mode='bilinear', align_corners=True)
-            merge_feat_bin = torch.cat([query_feat_bin, supp_feat_bin, corr_mask_bin], 1)
-            merge_feat_bin = self.init_merge[idx](merge_feat_bin)
+        if self.use_prior:
+            corr_query_mask = self.generate_prior(query_feat_high, supp_feat_high, s_y, fts_size)
+        else:
+            corr_query_mask = None
 
-            if idx >= 1:
-                pre_feat_bin = pyramid_feat_list[idx-1].clone()
-                pre_feat_bin = F.interpolate(pre_feat_bin, size=(bin, bin), mode='bilinear', align_corners=True)
-                rec_feat_bin = torch.cat([merge_feat_bin, pre_feat_bin], 1)
-                merge_feat_bin = self.alpha_conv[idx-1](rec_feat_bin) + merge_feat_bin
-
-            merge_feat_bin = self.beta_conv[idx](merge_feat_bin) + merge_feat_bin
-            merge_feat_bin = F.interpolate(merge_feat_bin, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear', align_corners=True)
-            pyramid_feat_list.append(merge_feat_bin)
-                 
-        query_feat = torch.cat(pyramid_feat_list, 1)
-        query_feat = self.res1(query_feat)
-        query_feat = self.res2(query_feat)   
-        fused_query_feat = query_feat.clone()                   
-        # Output Part
-        out1=torch.sigmoid(torch.einsum("bchw,bcl->blhw",fused_query_feat,fg_embed))
-        out = F.interpolate(out1, size=(height, width), mode='bilinear', align_corners=True) 
-        return out
+        logits = self.decoder(qry_bcb_fts, prototype, corr_query_mask)
+        logits = F.interpolate(logits, size=(height, width), mode='bilinear', align_corners=True)
+        return torch.sigmoid(logits)
 
     def predict_mask(self, batch):
         logit_mask = self(batch['query_img'], batch['support_imgs'], batch['support_masks'])
