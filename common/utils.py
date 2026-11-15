@@ -1,4 +1,3 @@
-r""" Helper functions """
 import random
 
 import torch
@@ -22,10 +21,16 @@ def mean(x):
 
 
 def to_cuda(batch):
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     for key, value in batch.items():
         if isinstance(value, torch.Tensor):
-            batch[key] = value.cuda()
+            batch[key] = value.to(device)
     return batch
+
+
+def bf16_autocast(model, enabled=True):
+    device_type = next(model.parameters()).device.type
+    return torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=enabled)
 
 
 def to_cpu(tensor):

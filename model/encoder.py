@@ -1,5 +1,12 @@
+import logging
+import os
+import sys
+
 import torch
 import torch.nn as nn
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 from sam2.build_sam import build_sam2
 
 
@@ -23,13 +30,14 @@ class Adapter(nn.Module):
 
 
 class SAM2(nn.Module):
-    def __init__(self, checkpoint_path: str = None) -> None:
+    def __init__(self, checkpoint_path: str = None, model_cfg: str = "sam2_hiera_l.yaml") -> None:
         super(SAM2, self).__init__()    
-        model_cfg = "sam2_hiera_l.yaml"
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         if checkpoint_path:
-            model = build_sam2(model_cfg, checkpoint_path)
+            model = build_sam2(model_cfg, checkpoint_path, device=device)
         else:
-            model = build_sam2(model_cfg)
+            logging.warning('SAM2 checkpoint not provided, image encoder uses random weights')
+            model = build_sam2(model_cfg, device=device)
         del model.sam_mask_decoder
         del model.sam_prompt_encoder
         del model.memory_encoder
@@ -39,6 +47,7 @@ class SAM2(nn.Module):
         del model.obj_ptr_proj
         del model.image_encoder.neck
         self.encoder = model.image_encoder.trunk
+        self.channel_list = list(self.encoder.channel_list)
 
         for param in self.encoder.parameters():
             param.requires_grad = False
@@ -63,7 +72,8 @@ class SAM2(nn.Module):
 
 if __name__ == "__main__":
     with torch.no_grad():
-        model = SAM2().cuda()
-        x = torch.randn(1, 3, 352, 352).cuda()
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = SAM2().to(device)
+        x = torch.randn(1, 3, 352, 352, device=device)
         out = model(x)
         print(out['0'].shape, out['1'].shape, out['2'].shape, out['3'].shape)

@@ -1,11 +1,7 @@
-r""" Hypercorrelation Squeeze testing code """
 import argparse
-
-import torch.nn.functional as F
-import torch.nn as nn
 import torch
 
-from PF.model.fewshot import ProtoFormer
+from model.fewshot import ProtoFormer
 from common.logger import Logger, AverageMeter
 from common.vis import Visualizer
 from common.evaluation import Evaluator
@@ -13,16 +9,14 @@ from common import utils
 from data.dataset import FSSDataset
 
 
-def test(model, dataloader, nshot):
-    r""" Test HSNet """
-
-    # Freeze randomness during testing for reproducibility
+def test(model, dataloader, amp=True):
     utils.fix_randseed(0)
     average_meter = AverageMeter(dataloader.dataset)
 
     for idx, batch in enumerate(dataloader):
         batch = utils.to_cuda(batch)
-        logit_mask = model.predict_mask(batch)
+        with utils.bf16_autocast(model, amp):
+            logit_mask = model.predict_mask(batch)
         pred_mask=(logit_mask>0.5).float().squeeze(1)
 
         # 2. Evaluate prediction
@@ -58,12 +52,14 @@ if __name__ == '__main__':
     parser.add_argument('--reduce_dim', type=int, default=64)
     parser.add_argument('--fold', type=int, default=0, choices=[0, 1, 2, 3])
     parser.add_argument('--shot', type=int, default=1)
+    parser.add_argument('--sam2_ckpt', type=str, default=None)
+    parser.add_argument('--amp', type=int, default=1)
     parser.add_argument('--visualize', default=True)
     args = parser.parse_args()
     Logger.initialize(args, training=False)
 
     # Model initialization
-    model = ProtoFormer(layers=args.layers, shot=args.shot, reduce_dim=args.reduce_dim)
+    model = ProtoFormer(layers=args.layers, shot=args.shot, reduce_dim=args.reduce_dim, checkpoint_path=args.sam2_ckpt)
     model.eval()
     Logger.log_params(model)
 
@@ -74,18 +70,18 @@ if __name__ == '__main__':
 
     # Load trained model
     if args.load == '': raise Exception('Pretrained model not specified.')
-    model.load_state_dict(torch.load(args.load))
+    model.load_state_dict(torch.load(args.load, weights_only=False))
 
     # Helper classes (for testing) initialization
     Evaluator.initialize()
     Visualizer.initialize(args.visualize,'./vis/')
 
     # Dataset initialization
-    FSSDataset.initialize(img_size=473, datapath=args.datapath)
+    FSSDataset.initialize(img_size=512, datapath=args.datapath)
     dataloader_test = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'val', args.shot)
 
     # Test HSNet
     with torch.no_grad():
-        test_miou, test_fb_iou = test(model, dataloader_test, args.shot)
+        test_miou, test_fb_iou = test(model, dataloader_test, amp=bool(args.amp))
     Logger.info('Fold %d mIoU: %5.2f \t FB-IoU: %5.2f' % (args.fold, test_miou.item(), test_fb_iou.item()))
     Logger.info('==================== Finished Testing ====================')

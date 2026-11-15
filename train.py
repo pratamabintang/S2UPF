@@ -1,20 +1,15 @@
-r""" ProtoFormer training (validation) code """
 import argparse
-import os
 import torch.optim as optim
-import torch.nn as nn
 import torch
 
-from PF.model.fewshot import ProtoFormer
+from model.fewshot import ProtoFormer
 from common.logger import Logger, AverageMeter
 from common.evaluation import Evaluator
 from common import utils
 from data.dataset import FSSDataset
 
 
-def train(epoch, model, dataloader, optimizer, training):
-    r""" Train ProtoFormer """
-
+def train(epoch, model, dataloader, optimizer, training, amp=True):
     # Force randomness during training / freeze randomness during testing
     utils.fix_randseed(None) if training else utils.fix_randseed(0)
     model.train() if training else model.eval()
@@ -24,10 +19,12 @@ def train(epoch, model, dataloader, optimizer, training):
 
         batch = utils.to_cuda(batch)
         if training:
-            logit_mask = model(batch['query_img'], batch['support_imgs'], batch['support_masks'])
-            loss = model.compute_loss(logit_mask, batch['query_mask'])
+            with utils.bf16_autocast(model, amp):
+                logit_mask = model(batch['query_img'], batch['support_imgs'], batch['support_masks'])
+            loss = model.compute_loss(logit_mask.float(), batch['query_mask'])
         else:
-            logit_mask = model.predict_mask(batch)
+            with utils.bf16_autocast(model, amp):
+                logit_mask = model.predict_mask(batch)
         pred_mask=(logit_mask>0.5).float().squeeze(1)
         if training:           
             optimizer.zero_grad()
@@ -66,11 +63,13 @@ if __name__ == '__main__':
     parser.add_argument('--reduce_dim', type=int, default=64)
     parser.add_argument('--fold', type=int, default=0, choices=[0, 1, 2, 3])
     parser.add_argument('--shot',type=int, default=1)
+    parser.add_argument('--sam2_ckpt', type=str, default=None)
+    parser.add_argument('--amp', type=int, default=1)
     args = parser.parse_args()
     Logger.initialize(args, training=True)
 
     # Model initialization
-    model = ProtoFormer(layers=args.layers,shot=args.shot,reduce_dim=args.reduce_dim)
+    model = ProtoFormer(layers=args.layers,shot=args.shot,reduce_dim=args.reduce_dim,checkpoint_path=args.sam2_ckpt)
     Logger.log_params(model)
     # Device setup
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -82,7 +81,7 @@ if __name__ == '__main__':
     Evaluator.initialize()
 
     # Dataset initialization
-    FSSDataset.initialize(img_size=473, datapath=args.datapath)
+    FSSDataset.initialize(img_size=480, datapath=args.datapath)
     dataloader_trn = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'trn',shot=args.shot)
     dataloader_val = FSSDataset.build_dataloader(args.benchmark, 1, args.nworker, args.fold, 'val',shot=args.shot)
 
@@ -90,9 +89,9 @@ if __name__ == '__main__':
     best_val_loss = float('inf')
 
     for epoch in range(args.niter):
-        trn_loss, trn_miou, trn_fb_iou = train(epoch, model, dataloader_trn, optimizer, training=True)
+        trn_loss, trn_miou, trn_fb_iou = train(epoch, model, dataloader_trn, optimizer, training=True, amp=bool(args.amp))
         with torch.no_grad():
-            val_loss, val_miou, val_fb_iou = train(epoch, model, dataloader_val, optimizer, training=False)
+            val_loss, val_miou, val_fb_iou = train(epoch, model, dataloader_val, optimizer, training=False, amp=bool(args.amp))
 
         # Save the best model
         if val_miou > best_val_miou:

@@ -1,4 +1,3 @@
-r""" Logging during training/testing """
 import datetime
 import logging
 import os
@@ -12,7 +11,8 @@ class AverageMeter:
     def __init__(self, dataset):
         self.benchmark = dataset.benchmark
         self.class_ids_interest = dataset.class_ids
-        self.class_ids_interest = torch.tensor(self.class_ids_interest).cuda()
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.class_ids_interest = torch.tensor(self.class_ids_interest).to(self.device)
 
         if self.benchmark == 'pascal':
             self.nclass = 20
@@ -21,8 +21,8 @@ class AverageMeter:
         elif self.benchmark == 'fss':
             self.nclass = 1000
 
-        self.intersection_buf = torch.zeros([2, self.nclass]).float().cuda()
-        self.union_buf = torch.zeros([2, self.nclass]).float().cuda()
+        self.intersection_buf = torch.zeros([2, self.nclass]).float().to(self.device)
+        self.union_buf = torch.zeros([2, self.nclass]).float().to(self.device)
         self.ones = torch.ones_like(self.union_buf)
         self.loss_buf = []
 

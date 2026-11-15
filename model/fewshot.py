@@ -1,7 +1,6 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from .resnet import *
 from .loss import WeightedDiceLoss
 from .transformer import PositionEmbeddingSine
 from .transformer import Transformer
@@ -19,15 +18,19 @@ class ProtoFormer(nn.Module):
         self,
         shot: int = 1,
         reduce_dim: int = 64,
-        criterion = WeightedDiceLoss(),
-        checkpoint_path: str = None
+        criterion = None,
+        checkpoint_path: str = None,
+        model_cfg: str = "sam2_hiera_l.yaml"
     ):
         super(ProtoFormer, self).__init__()
-        self.criterion = criterion
+        self.criterion = criterion if criterion is not None else WeightedDiceLoss()
         self.shot = shot
         self.reduce_dim = reduce_dim
 
-        in_fea_dim = 288 + 576      
+        self.backbone = SAM2(checkpoint_path=checkpoint_path, model_cfg=model_cfg)
+        channels = list(reversed(self.backbone.channel_list))
+        in_fea_dim = channels[1] + channels[2]
+        self.high_dim = channels[3]
 
         drop_out = 0.5
         self.adjust_feature_supp = nn.Sequential(
@@ -101,10 +104,11 @@ class ProtoFormer(nn.Module):
         self.alpha_conv = nn.ModuleList(self.alpha_conv)    
 
         self.init_weights()
-        self.backbone = SAM2(checkpoint_path=checkpoint_path)
 
     def init_weights(self):
-        for m in self.modules():
+        for name, m in self.named_modules():
+            if name == 'backbone' or name.startswith('backbone.'):
+                continue
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 if hasattr(m, 'bias') and m.bias is not None:
@@ -178,12 +182,11 @@ class ProtoFormer(nn.Module):
         query_feat_high = qry_bcb_fts['3']
         high_size = supp_bcb_fts['3'].shape[-2:]
         supp_feat_high = supp_bcb_fts['3'].view(
-            batch_size, self.shot, 1152, high_size[0], high_size[1]
+            batch_size, self.shot, self.high_dim, high_size[0], high_size[1]
         )
         corr_query_mask = self.generate_prior(query_feat_high, supp_feat_high, s_y, fts_size)
         
         pyramid_feat_list = []
-        out_list = []
         for idx, tmp_bin in enumerate(self.pyramid_bins):
             if tmp_bin <= 1.0:
                 bin = int(query_feat.shape[2] * tmp_bin)
@@ -203,10 +206,8 @@ class ProtoFormer(nn.Module):
                 merge_feat_bin = self.alpha_conv[idx-1](rec_feat_bin) + merge_feat_bin
 
             merge_feat_bin = self.beta_conv[idx](merge_feat_bin) + merge_feat_bin
-            inner_out_bin = merge_feat_bin
             merge_feat_bin = F.interpolate(merge_feat_bin, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear', align_corners=True)
             pyramid_feat_list.append(merge_feat_bin)
-            out_list.append(inner_out_bin)
                  
         query_feat = torch.cat(pyramid_feat_list, 1)
         query_feat = self.res1(query_feat)
