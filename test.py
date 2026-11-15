@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 import torch
 
-from model.protoformer import ProtoFormer
+from PF.model.fewshot import ProtoFormer
 from common.logger import Logger, AverageMeter
 from common.vis import Visualizer
 from common.evaluation import Evaluator
