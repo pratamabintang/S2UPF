@@ -59,7 +59,6 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--niter', type=int, default=30)
     parser.add_argument('--nworker', type=int, default=4)
-    parser.add_argument('--layers', type=int, default=50)
     parser.add_argument('--reduce_dim', type=int, default=64)
     parser.add_argument('--fold', type=int, default=0, choices=[0, 1, 2, 3])
     parser.add_argument('--shot',type=int, default=1)
@@ -69,7 +68,7 @@ if __name__ == '__main__':
     Logger.initialize(args, training=True)
 
     # Model initialization
-    model = ProtoFormer(layers=args.layers,shot=args.shot,reduce_dim=args.reduce_dim,checkpoint_path=args.sam2_ckpt)
+    model = ProtoFormer(shot=args.shot,reduce_dim=args.reduce_dim,checkpoint_path=args.sam2_ckpt)
     Logger.log_params(model)
     # Device setup
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
