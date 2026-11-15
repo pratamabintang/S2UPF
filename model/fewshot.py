@@ -3,9 +3,9 @@ from torch import nn
 import torch.nn.functional as F
 from .resnet import *
 from .loss import WeightedDiceLoss
-from .backbone_utils import Backbone
 from .transformer import PositionEmbeddingSine
 from .transformer import Transformer
+from .encoder import SAM2
 
 def Weighted_GAP(supp_feat, mask):
     supp_feat = supp_feat * mask
@@ -15,16 +15,19 @@ def Weighted_GAP(supp_feat, mask):
     return supp_feat
 
 class ProtoFormer(nn.Module):
-    def __init__(self, layers=50, shot=1, reduce_dim=64, criterion=WeightedDiceLoss()):
+    def __init__(
+        self,
+        shot: int = 1,
+        reduce_dim: int = 64,
+        criterion = WeightedDiceLoss(),
+        checkpoint_path: str = None
+    ):
         super(ProtoFormer, self).__init__()
-        assert layers in [50, 101]
-        assert classes > 1 
-        self.layers = layers
         self.criterion = criterion
         self.shot = shot
         self.reduce_dim = reduce_dim
 
-        in_fea_dim = 1024 + 512      
+        in_fea_dim = 288 + 576      
 
         drop_out = 0.5
         self.adjust_feature_supp = nn.Sequential(
@@ -98,7 +101,7 @@ class ProtoFormer(nn.Module):
         self.alpha_conv = nn.ModuleList(self.alpha_conv)    
 
         self.init_weights()
-        self.backbone = Backbone('resnet{}'.format(layers), train_backbone=False, return_interm_layers=True, dilation=[False, True, True])
+        self.backbone = SAM2(checkpoint_path=checkpoint_path)
 
     def init_weights(self):
         for m in self.modules():
@@ -108,17 +111,48 @@ class ProtoFormer(nn.Module):
                     nn.init.constant_(m.bias, 0)
 
 
-    def forward(self, x, s_x=torch.FloatTensor(1,1,3,473,473).cuda(), s_y=torch.FloatTensor(1,1,473,473).cuda()):
-        batch_size, C, h, w = x.size()
+    def forward(
+        self,
+        x,
+        s_x=None,
+        s_y=None
+    ):
+        if s_x is None or s_y is None:
+            raise ValueError("support missing")
+
+        batch_size, _, height, width = x.size()
         img_size = x.size()[-2:]
 
-        # backbone feature extraction
-        qry_bcb_fts = self.backbone(x)
-        supp_bcb_fts = self.backbone(s_x.view(-1, 3, *img_size))
-        query_feat = torch.cat([qry_bcb_fts['1'], qry_bcb_fts['2']], dim=1)
-        supp_feat = torch.cat([supp_bcb_fts['1'], supp_bcb_fts['2']], dim=1)
+        # backbone
+        all_imgs = torch.cat([x, s_x.view(-1, 3, *img_size)], dim=0)
+        all_fts = self.backbone(all_imgs)
+
+        # separate
+        qry_bcb_fts = {}
+        supp_bcb_fts = {}
+        for key in all_fts.keys():
+            qry_bcb_fts[key] = all_fts[key][:batch_size]
+            supp_bcb_fts[key] = all_fts[key][batch_size:]
+
+
+        query_feat_2 = F.interpolate(
+            qry_bcb_fts['2'],
+            size=qry_bcb_fts['1'].shape[-2:],
+            mode='bilinear',
+            align_corners=True
+        )
+        supp_feat_2 = F.interpolate(
+            supp_bcb_fts['2'],
+            size=supp_bcb_fts['1'].shape[-2:],
+            mode='bilinear',
+            align_corners=True
+        )
+        query_feat = torch.cat([qry_bcb_fts['1'], query_feat_2], dim=1)
+        supp_feat = torch.cat([supp_bcb_fts['1'], supp_feat_2], dim=1)
+
         query_feat = self.adjust_feature_qry(query_feat)
         supp_feat = self.adjust_feature_supp(supp_feat) 
+
         fts_size = query_feat.shape[-2:]
         supp_feat_list = []
         r_supp_feat = supp_feat.view(batch_size, self.shot, -1, fts_size[0], fts_size[1])
@@ -142,7 +176,10 @@ class ProtoFormer(nn.Module):
         fg_embed=self.transformer(key_embed,masking,query_embed,query_pos,key_pos)
         # prior generation
         query_feat_high = qry_bcb_fts['3']
-        supp_feat_high = supp_bcb_fts['3'].view(batch_size, -1, 2048, fts_size[0], fts_size[1])
+        high_size = supp_bcb_fts['3'].shape[-2:]
+        supp_feat_high = supp_bcb_fts['3'].view(
+            batch_size, self.shot, 1152, high_size[0], high_size[1]
+        )
         corr_query_mask = self.generate_prior(query_feat_high, supp_feat_high, s_y, fts_size)
         
         pyramid_feat_list = []
@@ -177,7 +214,7 @@ class ProtoFormer(nn.Module):
         fused_query_feat = query_feat.clone()                   
         # Output Part
         out1=torch.sigmoid(torch.einsum("bchw,bcl->blhw",fused_query_feat,fg_embed))
-        out = F.interpolate(out1, size=(h, w), mode='bilinear', align_corners=True) 
+        out = F.interpolate(out1, size=(height, width), mode='bilinear', align_corners=True) 
         return out
 
     def predict_mask(self, batch):
@@ -190,31 +227,28 @@ class ProtoFormer(nn.Module):
         return self.criterion(logit_mask, gt_mask.long())
 
     def generate_prior(self, query_feat_high, supp_feat_high, s_y, fts_size):
-        bsize, _, sp_sz, _ = query_feat_high.size()[:]
+        bsize, _, qh, qw = query_feat_high.size()
         corr_query_mask_list = []
         cosine_eps = 1e-7
         for st in range(self.shot):
             tmp_mask = (s_y[:,st,:,:] == 1).float().unsqueeze(1)
-            tmp_mask = F.interpolate(tmp_mask, size=(fts_size[0], fts_size[1]), mode='bilinear', align_corners=True)
+            tmp_mask = F.interpolate(tmp_mask, size=supp_feat_high.shape[-2:], mode='bilinear', align_corners=True)
 
             tmp_supp_feat = supp_feat_high[:,st,...] * tmp_mask               
             q = self.high_avg_pool(query_feat_high.flatten(2).transpose(-2, -1))  # [bs, h*w, c]
             s = self.high_avg_pool(tmp_supp_feat.flatten(2).transpose(-2, -1))  # [bs, h*w, c]
 
-            tmp_query = q
-            tmp_query = tmp_query.contiguous().permute(0, 2, 1)  # [bs, c, h*w]
+            tmp_query = q.contiguous().permute(0, 2, 1)  # [bs, c, h*w]
             tmp_query_norm = torch.norm(tmp_query, 2, 1, True)
 
-            tmp_supp = s               
-            tmp_supp = tmp_supp.contiguous() 
-            tmp_supp = tmp_supp.contiguous() 
+            tmp_supp = s.contiguous()
             tmp_supp_norm = torch.norm(tmp_supp, 2, 2, True) 
 
             similarity = torch.bmm(tmp_supp, tmp_query)/(torch.bmm(tmp_supp_norm, tmp_query_norm) + cosine_eps)   
-            similarity = similarity.max(1)[0].view(bsize, sp_sz*sp_sz)   
-            similarity = (similarity - similarity.min(1)[0].unsqueeze(1))/(similarity.max(1)[0].unsqueeze(1) - similarity.min(1)[0].unsqueeze(1) + cosine_eps)
-            corr_query = similarity.view(bsize, 1, sp_sz, sp_sz)
-            corr_query = F.interpolate(corr_query, size=(fts_size[0], fts_size[1]), mode='bilinear', align_corners=True)
+            similarity = similarity.max(1)[0].view(bsize, qh, qw)   
+            similarity = (similarity.flatten(1) - similarity.flatten(1).min(1)[0].unsqueeze(1)) / (similarity.flatten(1).max(1)[0].unsqueeze(1) - similarity.flatten(1).min(1)[0].unsqueeze(1) + cosine_eps)
+            similarity = similarity.view(bsize, 1, qh, qw)
+            corr_query = F.interpolate(similarity, size=fts_size, mode='bilinear', align_corners=True)
             corr_query_mask_list.append(corr_query)  
         corr_query_mask = torch.cat(corr_query_mask_list, 1).mean(1).unsqueeze(1)     
         return corr_query_mask
