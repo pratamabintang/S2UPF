@@ -18,6 +18,7 @@ class ProtoFormer(nn.Module):
         self,
         shot: int = 1,
         reduce_dim: int = 64,
+        img_size: int = 512,
         criterion = None,
         checkpoint_path: str = None,
         model_cfg: str = "sam2_hiera_l.yaml"
@@ -60,7 +61,11 @@ class ProtoFormer(nn.Module):
 
         self.high_avg_pool = nn.Identity()        
         prior_channel = 1 
-        self.pyramid_bins = [60, 30, 15, 8]
+        if img_size % 32 != 0:
+            raise ValueError('img_size must be a multiple of 32, got %d' % img_size)
+        self.img_size = img_size
+        fts = img_size // 8
+        self.pyramid_bins = [(fts + r - 1) // r for r in (1, 2, 4, 8)]
         self.avgpool_list = []
         for bin in self.pyramid_bins:
             if bin > 1:

@@ -57,9 +57,11 @@ if __name__ == '__main__':
     parser.add_argument('--logpath', type=str, default='log_protoformer_r50_coco0')
     parser.add_argument('--bsz', type=int, default=32)
     parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--adapter_lr', type=float, default=1e-4)
     parser.add_argument('--niter', type=int, default=30)
     parser.add_argument('--nworker', type=int, default=4)
     parser.add_argument('--reduce_dim', type=int, default=64)
+    parser.add_argument('--img_size', type=int, default=512)
     parser.add_argument('--fold', type=int, default=0, choices=[0, 1, 2, 3])
     parser.add_argument('--shot',type=int, default=1)
     parser.add_argument('--sam2_ckpt', type=str, default=None)
@@ -68,19 +70,24 @@ if __name__ == '__main__':
     Logger.initialize(args, training=True)
 
     # Model initialization
-    model = ProtoFormer(shot=args.shot,reduce_dim=args.reduce_dim,checkpoint_path=args.sam2_ckpt)
+    model = ProtoFormer(shot=args.shot,reduce_dim=args.reduce_dim,checkpoint_path=args.sam2_ckpt,img_size=args.img_size)
     Logger.log_params(model)
     # Device setup
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     Logger.info('# available GPUs: %d' % torch.cuda.device_count())
     model.to(device)
 
-    # Helper classes (for training) initialization
-    optimizer = optim.Adam([{"params": model.parameters(), "lr": args.lr}])
+    adapter_params = [p for n, p in model.named_parameters() if 'prompt_learn' in n and p.requires_grad]
+    head_params = [p for n, p in model.named_parameters() if 'prompt_learn' not in n and p.requires_grad]
+    Logger.info('# adapter params: %d, head params: %d' % (sum(p.numel() for p in adapter_params), sum(p.numel() for p in head_params)))
+    optimizer = optim.Adam([
+        {"params": head_params, "lr": args.lr},
+        {"params": adapter_params, "lr": args.adapter_lr},
+    ])
     Evaluator.initialize()
 
     # Dataset initialization
-    FSSDataset.initialize(img_size=480, datapath=args.datapath)
+    FSSDataset.initialize(img_size=args.img_size, datapath=args.datapath)
     dataloader_trn = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'trn',shot=args.shot)
     dataloader_val = FSSDataset.build_dataloader(args.benchmark, 1, args.nworker, args.fold, 'val',shot=args.shot)
 

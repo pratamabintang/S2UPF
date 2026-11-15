@@ -11,9 +11,10 @@ from sam2.build_sam import build_sam2
 
 
 class Adapter(nn.Module):
-    def __init__(self, blk) -> None:
+    def __init__(self, blk, scale: float = 0.1) -> None:
         super(Adapter, self).__init__()
         self.block = blk
+        self.scale = scale
         dim = blk.attn.qkv.in_features
         self.prompt_learn = nn.Sequential(
             nn.Linear(dim, 32),
@@ -21,11 +22,13 @@ class Adapter(nn.Module):
             nn.Linear(32, dim),
             nn.GELU()
         )
+        nn.init.zeros_(self.prompt_learn[2].weight)
+        nn.init.zeros_(self.prompt_learn[2].bias)
 
     def forward(self, x):
         prompt = self.prompt_learn(x)
-        promped = x + prompt
-        net = self.block(promped)
+        prompted = x + self.scale * prompt
+        net = self.block(prompted)
         return net
 
 
